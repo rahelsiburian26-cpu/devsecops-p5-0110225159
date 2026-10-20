@@ -4,7 +4,10 @@ Tests cover database CRUD operations, utility helpers, and API routes.
 """
 
 import json
+import os
+import tempfile
 import unittest
+
 from app import create_app
 from app.config import TestingConfig
 from app.database import (
@@ -104,13 +107,28 @@ class TestUtilityFunctions(unittest.TestCase):
 
 
 class TestDatabaseOperations(unittest.TestCase):
-    """Tests for app/database.py CRUD functions using an in-memory DB."""
+    """
+    Tests for app/database.py CRUD functions.
+    Uses a real temp file so all connections share the same DB instance.
+    SQLite :memory: creates a fresh DB per connection, which breaks CRUD tests.
+    """
 
     def setUp(self):
-        """Reinitialise the in-memory database before each test."""
-        from app import database as db_module
-        db_module._db_path = ":memory:"
+        """Create a temporary file-based SQLite DB before each test."""
+        import app.database as db_module
+        self._db_fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        db_module._db_path = self._db_path
         init_db()
+
+    def tearDown(self):
+        """Remove the temporary DB file after each test."""
+        import app.database as db_module
+        db_module._db_path = "taskflow.db"
+        os.close(self._db_fd)
+        try:
+            os.unlink(self._db_path)
+        except OSError:
+            pass
 
     def test_create_task_returns_dict(self):
         task = create_task("Buy groceries")
@@ -144,7 +162,7 @@ class TestDatabaseOperations(unittest.TestCase):
         t = create_task("Done task")
         update_task(t["id"], status="done")
         done = get_all_tasks(status="done")
-        self.assertTrue(all(t["status"] == "done" for t in done))
+        self.assertTrue(all(task["status"] == "done" for task in done))
 
     def test_update_task_status(self):
         task = create_task("Update me")
@@ -170,13 +188,33 @@ class TestDatabaseOperations(unittest.TestCase):
         self.assertIsNone(get_task_by_id(task["id"]))
 
 
+class _TempDbTestingConfig(TestingConfig):
+    """
+    TestingConfig override that uses a real temp file instead of :memory:.
+    This avoids the SQLite limitation where each connect(':memory:') opens
+    a brand-new, empty database — which would make all app DB calls fail.
+    """
+    # DATABASE_URI is set dynamically in TestAPIRoutes.setUpClass
+    pass
+
+
 class TestAPIRoutes(unittest.TestCase):
     """Integration tests for the Flask REST API endpoints."""
 
     def setUp(self):
-        """Create a test Flask client with an in-memory database."""
-        self.app = create_app(TestingConfig)
+        """Create a temp DB file and a test Flask client for each test."""
+        self._db_fd, self._db_path = tempfile.mkstemp(suffix=".db")
+        _TempDbTestingConfig.DATABASE_URI = f"sqlite:///{self._db_path}"
+        self.app = create_app(_TempDbTestingConfig)
         self.client = self.app.test_client()
+
+    def tearDown(self):
+        """Remove the temp DB file after each test."""
+        os.close(self._db_fd)
+        try:
+            os.unlink(self._db_path)
+        except OSError:
+            pass
 
     def test_health_check(self):
         resp = self.client.get("/api/health")
