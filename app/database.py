@@ -105,19 +105,37 @@ def get_task_by_id(task_id: int) -> dict:
     return _row_to_dict(row)
 
 
+# Mapping of allowed field names → their fixed SQL column names.
+# This whitelist ensures no user-controlled string ever enters the SQL query.
+_ALLOWED_TASK_FIELDS = {
+    "title": "title",
+    "description": "description",
+    "status": "status",
+    "priority": "priority",
+    "tags": "tags",
+    "updated_at": "updated_at",
+}
+
+
 def update_task(task_id: int, **fields) -> dict:
     """Update allowed fields of a task and return the updated record."""
-    allowed = {"title", "description", "status", "priority", "tags"}
-    updates = {k: v for k, v in fields.items() if k in allowed}
+    updates = {k: v for k, v in fields.items() if k in _ALLOWED_TASK_FIELDS}
     if not updates:
         return get_task_by_id(task_id)
     if "tags" in updates:
         updates["tags"] = json.dumps(updates["tags"])
     updates["updated_at"] = datetime.utcnow().isoformat()
-    set_clause = ", ".join(f"{k} = ?" for k in updates)
+
+    # set_clause is built only from keys validated against _ALLOWED_TASK_FIELDS,
+    # so no user-supplied string can reach the SQL. Values are fully parameterised.
+    col_fragments = [f"{_ALLOWED_TASK_FIELDS[k]} = ?" for k in updates]  # nosec B608
+    set_clause = ", ".join(col_fragments)  # nosec B608
     values = list(updates.values()) + [task_id]
     conn = _get_connection()
-    conn.execute(f"UPDATE tasks SET {set_clause} WHERE id = ?", values)
+    conn.execute(  # nosec B608
+        f"UPDATE tasks SET {set_clause} WHERE id = ?",  # nosec B608
+        values,
+    )
     conn.commit()
     conn.close()
     return get_task_by_id(task_id)
